@@ -198,3 +198,66 @@ impl KVStore {
         })
     }
 }
+
+#[cfg(test)]
+mod test {
+    use tempfile::tempdir;
+
+    use super::*;
+
+    #[test]
+    fn persistence_round_trip() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kvs-test.bin");
+
+        let mut kvs = KVStore::open(path.as_path(), false).unwrap();
+        kvs.put("key1".as_bytes(), "val1".as_bytes()).unwrap();
+
+        kvs.put("key2".as_bytes(), "val2".as_bytes()).unwrap();
+        kvs.put("key2".as_bytes(), "val2-override".as_bytes())
+            .unwrap();
+
+        kvs.put("key3".as_bytes(), "val3".as_bytes()).unwrap();
+        kvs.del("key3".as_bytes()).unwrap();
+
+        let mut kvs2 = KVStore::open(path.as_path(), false).unwrap();
+        assert_eq!(
+            kvs2.get("key1".as_bytes()).unwrap(),
+            Some("val1".as_bytes().to_vec())
+        );
+        assert_eq!(
+            kvs2.get("key2".as_bytes()).unwrap(),
+            Some("val2-override".as_bytes().to_vec())
+        );
+        assert_eq!(kvs2.get("key3".as_bytes()).unwrap(), None);
+    }
+    #[test]
+    fn compact() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("kvs-test.bin");
+
+        let mut kvs = KVStore::open(path.as_path(), false).unwrap();
+        kvs.put("key1".as_bytes(), "val1".as_bytes()).unwrap();
+
+        kvs.put("key2".as_bytes(), "val2".as_bytes()).unwrap();
+
+        kvs.put("key3".as_bytes(), "val3".as_bytes()).unwrap();
+        kvs.del("key3".as_bytes()).unwrap();
+
+        let before = fs::metadata(&path).unwrap().len();
+        kvs.compact().unwrap();
+        let after = fs::metadata(&path).unwrap().len();
+
+        assert!(after < before);
+
+        assert_eq!(
+            kvs.get("key1".as_bytes()).unwrap(),
+            Some("val1".as_bytes().to_vec())
+        );
+        assert_eq!(
+            kvs.get("key2".as_bytes()).unwrap(),
+            Some("val2".as_bytes().to_vec())
+        );
+        assert_eq!(kvs.get("key3".as_bytes()).unwrap(), None);
+    }
+}
