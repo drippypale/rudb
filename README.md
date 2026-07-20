@@ -15,18 +15,27 @@ keys live in memory, values live on disk.
 - **Log file** — every write *appends* a length-prefixed record, never modifies in place:
 
   ```
-  [key_len: u32 LE][val_len: u32 LE][key bytes][val bytes]
+  [flag: u8][key_len: u32 LE][val_len: u32 LE][key bytes][val bytes]
   ```
 
+  `flag` is `0` = set, `1` = tombstone — deletion lives in the record format, not the
+  value bytes, so any byte pattern is a legal value.
 - **In-memory index** — `HashMap<Vec<u8>, u64>` mapping each key to the **byte offset**
   of its latest record in the log. The file is the source of truth; the map just says
   where to look.
 - **`get`** — index lookup → `seek` to the offset → read the record → return the value.
-- **`del`** — appends a *tombstone* record and drops the key from the index; replay
+- **`del`** — appends a tombstone record and drops the key from the index; replay
   treats a tombstone as "remove this key".
 - **Startup replay** — on `open`, the log is scanned front-to-back to rebuild the index.
   Records are replayed in file order, so the **last write for a key wins**. A clean
   `UnexpectedEof` ends replay; a torn tail record from a crash is safely ignored.
+- **Compaction** — `compact()` rewrites the log with only the live records (those the
+  index points at), then atomically swaps it in (`fsync` temp → `rename` → reopen
+  handles → rebuild index). Dead records and tombstones are reclaimed.
+- **Durability** — a per-store `SyncPolicy` (`Always` = `fsync` every write; `Never` =
+  let the OS flush) trades durability against throughput. See
+  [`examples/durability_bench.rs`](examples/durability_bench.rs) — on this dev machine,
+  ~271 writes/s (`Always`, true `F_FULLFSYNC`) vs ~107k writes/s (`Never`): a ~400× gap.
 
 Keys and values are arbitrary **bytes** (`Vec<u8>` / `&[u8]`), never assumed to be UTF-8.
 
@@ -54,8 +63,9 @@ Built stage by stage; each stage is a self-contained, shippable milestone.
 - [x] **Stage 0 — In-memory KV store.** `HashMap`-backed `get`/`put`/`del` + REPL.
 - [x] **Stage 1 — Append-only log.** Length-prefixed records, in-memory offset index,
       tombstone deletes, crash-safe startup replay. Data survives a restart.
-- [ ] **Stage 2 — Compaction & durability.** Compact the log (drop dead/overwritten
-      records), segment files, explicit `fsync` control. Robust tombstone format.
+- [x] **Stage 2 — Compaction & durability.** Flag-based tombstones, crash-safe log
+      compaction (atomic rename swap), configurable `fsync` policy + a benchmark proving
+      the durability/throughput tradeoff. _(Segment files deferred as a stretch goal.)_
 - [ ] **Stage 3 — On-disk B+Tree.** Page-based index; store more keys than fit in RAM;
       ordered iteration & range scans.
 - [ ] **Stage 4 — WAL + crash recovery.** Write-ahead log, buffer pool with LRU eviction.
@@ -64,10 +74,12 @@ Built stage by stage; each stage is a self-contained, shippable milestone.
 
 ## Known limitations (tracked for later)
 
-- **Tombstone collides with data** — a delete is encoded as the value `\0\0\0\0`, so a
-  legitimate 4-null-byte value would be read as a deletion. To be fixed in Stage 2 by
-  moving deletion into the record format (a type/flag field) rather than the value bytes.
-- **No compaction yet** — the log grows unbounded; overwritten and deleted records are
-  never reclaimed until Stage 2.
+- **Compaction is manual** — `compact()` must be called explicitly (or via
+  `compact_on_init`); there's no automatic trigger on a size/dead-ratio threshold yet.
+- **No group commit** — `SyncPolicy` is all-or-nothing (`Always`/`Never`); an
+  `EverySec`-style batched fsync (near-`Never` throughput, bounded loss window) is the
+  obvious next durability mode.
+- **Whole index in RAM** — every key must fit in memory (Bitcask's tradeoff); addressed
+  by the on-disk B+Tree in Stage 3.
 - **Reads need `&mut`** — `get` seeks a shared file handle, so it takes `&mut self`
   (no concurrent readers). Revisited in Stage 5.
