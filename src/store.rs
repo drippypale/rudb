@@ -89,6 +89,9 @@ impl KVStore {
         };
 
         kvs.init_map()?;
+        if auto_compact {
+            kvs.compact()?;
+        }
 
         Ok(kvs)
     }
@@ -127,6 +130,29 @@ impl KVStore {
         self.map.remove(k);
 
         Ok(v)
+    }
+    pub fn compact(&mut self) -> Result<(), io::Error> {
+        let temp_path = self.path.with_extension("compact");
+        let mut wf = File::create(&temp_path)?;
+
+        let mut new_cursor = 0u64;
+        let mut new_map: HashMap<Vec<u8>, u64> = HashMap::new();
+
+        for (key, offset) in self.map.clone() {
+            let e = self.read_entry(offset)?;
+            new_map.insert(key, new_cursor);
+            new_cursor += e.write_all(&mut wf, false)?;
+        }
+
+        wf.sync_all()?;
+        fs::rename(&temp_path, &self.path)?;
+
+        self.w_file = File::options().create(true).append(true).open(&self.path)?;
+        self.r_file = File::open(&self.path)?;
+        self.cursor = new_cursor;
+        self.map = new_map;
+
+        Ok(())
     }
     fn init_map(&mut self) -> Result<(), io::Error> {
         loop {
