@@ -5,7 +5,14 @@ use crate::store::KVStore;
 pub mod store;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut s = KVStore::open(Path::new("kvstore.bin"), true).unwrap();
+    let mut s = store::KVStore::open(
+        Path::new("kvstore.bin"),
+        store::Options {
+            sync_policy: store::SyncPolicy::Always,
+            compact_on_init: true,
+        },
+    )
+    .unwrap();
     let mut q = String::new();
 
     loop {

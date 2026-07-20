@@ -11,6 +11,13 @@ enum Flag {
     Tombstone = 1,
 }
 
+#[derive(PartialEq, Clone, Copy)]
+pub enum SyncPolicy {
+    Always,
+    Never,
+    // EverySec,  TODO: : Add it later
+}
+
 impl TryFrom<u8> for Flag {
     type Error = ();
     fn try_from(value: u8) -> Result<Self, Self::Error> {
@@ -28,6 +35,13 @@ pub struct KVStore {
     w_file: File, // [key_len][val_len][key][val]
     r_file: File,
     cursor: u64,
+    sync_policy: SyncPolicy,
+}
+
+#[derive(Clone, Copy)]
+pub struct Options {
+    pub sync_policy: SyncPolicy,
+    pub compact_on_init: bool,
 }
 
 struct Entry {
@@ -73,7 +87,7 @@ impl Entry {
 }
 
 impl KVStore {
-    pub fn open(p: &Path, auto_compact: bool) -> Result<Self, io::Error> {
+    pub fn open(p: &Path, options: Options) -> Result<Self, io::Error> {
         let wf = File::options()
             .create(true)
             .append(true)
@@ -86,10 +100,11 @@ impl KVStore {
             w_file: wf,
             r_file: rf,
             cursor: 0,
+            sync_policy: options.sync_policy,
         };
 
         kvs.init_map()?;
-        if auto_compact {
+        if options.compact_on_init {
             kvs.compact()?;
         }
 
@@ -102,7 +117,7 @@ impl KVStore {
             val: v.to_vec(),
         };
 
-        e.write_all(&mut self.w_file, false)?;
+        e.write_all(&mut self.w_file, self.sync_policy == SyncPolicy::Always)?;
 
         self.map.insert(k.to_vec(), self.cursor);
         self.cursor += e.bytes_len();
@@ -126,7 +141,7 @@ impl KVStore {
             val: vec![],
         };
 
-        e.write_all(&mut self.w_file, false)?;
+        e.write_all(&mut self.w_file, self.sync_policy == SyncPolicy::Always)?;
         self.map.remove(k);
 
         Ok(v)
@@ -210,7 +225,12 @@ mod test {
         let dir = tempdir().unwrap();
         let path = dir.path().join("kvs-test.bin");
 
-        let mut kvs = KVStore::open(path.as_path(), false).unwrap();
+        let options = Options {
+            sync_policy: SyncPolicy::Always,
+            compact_on_init: false,
+        };
+
+        let mut kvs = KVStore::open(path.as_path(), options.clone()).unwrap();
         kvs.put("key1".as_bytes(), "val1".as_bytes()).unwrap();
 
         kvs.put("key2".as_bytes(), "val2".as_bytes()).unwrap();
@@ -220,7 +240,7 @@ mod test {
         kvs.put("key3".as_bytes(), "val3".as_bytes()).unwrap();
         kvs.del("key3".as_bytes()).unwrap();
 
-        let mut kvs2 = KVStore::open(path.as_path(), false).unwrap();
+        let mut kvs2 = KVStore::open(path.as_path(), options.clone()).unwrap();
         assert_eq!(
             kvs2.get("key1".as_bytes()).unwrap(),
             Some("val1".as_bytes().to_vec())
@@ -236,7 +256,12 @@ mod test {
         let dir = tempdir().unwrap();
         let path = dir.path().join("kvs-test.bin");
 
-        let mut kvs = KVStore::open(path.as_path(), false).unwrap();
+        let options = Options {
+            sync_policy: SyncPolicy::Always,
+            compact_on_init: false,
+        };
+
+        let mut kvs = KVStore::open(path.as_path(), options).unwrap();
         kvs.put("key1".as_bytes(), "val1".as_bytes()).unwrap();
 
         kvs.put("key2".as_bytes(), "val2".as_bytes()).unwrap();
