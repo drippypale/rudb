@@ -1,8 +1,6 @@
 use std::{error::Error, io, path::Path};
 
-use crate::store::KVStore;
-
-pub mod store;
+use rudb::store;
 
 fn main() -> Result<(), Box<dyn Error>> {
     let mut s = store::KVStore::open(
