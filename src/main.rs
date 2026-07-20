@@ -1,11 +1,11 @@
-use std::{error::Error, io};
+use std::{error::Error, io, path::Path};
 
 use crate::store::KVStore;
 
 pub mod store;
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let mut s = KVStore::open("kvstore.bin").unwrap();
+    let mut s = KVStore::open(Path::new("kvstore.bin"), true).unwrap();
     let mut q = String::new();
 
     loop {

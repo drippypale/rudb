@@ -1,33 +1,88 @@
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io::{self, Read, Seek, SeekFrom, Write},
+    path::{Path, PathBuf},
 };
 
-const TOMBSTONE: &[u8] = "\0\0\0\0".as_bytes();
+#[derive(PartialEq, Clone, Copy)]
+enum Flag {
+    Set = 0,
+    Tombstone = 1,
+}
+
+impl TryFrom<u8> for Flag {
+    type Error = ();
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Set),
+            1 => Ok(Self::Tombstone),
+            _ => Err(()),
+        }
+    }
+}
 
 pub struct KVStore {
     map: HashMap<Vec<u8>, u64>, // key: offset
-    w_file: File,               // [key_len][val_len][key][val]
+    path: PathBuf,
+    w_file: File, // [key_len][val_len][key][val]
     r_file: File,
     cursor: u64,
 }
 
 struct Entry {
-    bytes: u64,
-    // key_len: u32,
-    // val_len: u32,
+    flag: Flag,
     key: Vec<u8>,
     val: Vec<u8>,
 }
 
+impl Entry {
+    fn key_len_le_bytes(&self) -> [u8; 4] {
+        (self.key.len() as u32).to_le_bytes()
+    }
+    fn val_len_le_bytes(&self) -> [u8; 4] {
+        (self.val.len() as u32).to_le_bytes()
+    }
+    fn to_bytes(&self) -> Vec<u8> {
+        let line = [
+            &self.key_len_le_bytes(),
+            &self.val_len_le_bytes(),
+            self.key.as_slice(),
+            self.val.as_slice(),
+        ];
+
+        let mut bytes = vec![self.flag as u8];
+        bytes.extend_from_slice(&line.concat());
+        bytes
+    }
+
+    fn bytes_len(&self) -> u64 {
+        self.to_bytes().len() as u64
+    }
+
+    fn write_all(&self, f: &mut File, fsync: bool) -> Result<u64, io::Error> {
+        let bytes = self.to_bytes();
+        f.write_all(&bytes)?;
+
+        if fsync {
+            f.sync_all()?;
+        }
+
+        Ok(bytes.len() as u64)
+    }
+}
+
 impl KVStore {
-    pub fn open(p: &str) -> Result<Self, io::Error> {
-        let wf = File::options().create(true).append(true).open(p)?;
-        let rf = File::open(p)?;
+    pub fn open(p: &Path, auto_compact: bool) -> Result<Self, io::Error> {
+        let wf = File::options()
+            .create(true)
+            .append(true)
+            .open(p.as_os_str())?;
+        let rf = File::open(p.as_os_str())?;
 
         let mut kvs = Self {
             map: HashMap::new(),
+            path: p.to_path_buf(),
             w_file: wf,
             r_file: rf,
             cursor: 0,
@@ -38,18 +93,18 @@ impl KVStore {
         Ok(kvs)
     }
     pub fn put(&mut self, k: &[u8], v: &[u8]) -> Result<u64, io::Error> {
-        let k_len = (k.len() as u32).to_le_bytes();
-        let v_len = (v.len() as u32).to_le_bytes();
-        let line = [&k_len, &v_len, k, v];
+        let e = Entry {
+            flag: Flag::Set,
+            key: k.to_vec(),
+            val: v.to_vec(),
+        };
 
-        let bytes = line.concat();
-
-        self.w_file.write_all(&bytes)?;
+        e.write_all(&mut self.w_file, false)?;
 
         self.map.insert(k.to_vec(), self.cursor);
-        self.cursor += bytes.len() as u64;
+        self.cursor += e.bytes_len();
 
-        Ok(bytes.len() as u64)
+        Ok(e.bytes_len())
     }
     pub fn get(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, io::Error> {
         match self.map.get(k) {
@@ -62,7 +117,13 @@ impl KVStore {
     }
     pub fn del(&mut self, k: &[u8]) -> Result<Option<Vec<u8>>, io::Error> {
         let v = self.get(k)?;
-        self.put(k, TOMBSTONE)?;
+        let e = Entry {
+            flag: Flag::Tombstone,
+            key: k.to_vec(),
+            val: vec![],
+        };
+
+        e.write_all(&mut self.w_file, false)?;
         self.map.remove(k);
 
         Ok(v)
@@ -71,12 +132,11 @@ impl KVStore {
         loop {
             match self.read_entry(self.cursor) {
                 Ok(entry) => {
-                    if entry.val == TOMBSTONE {
-                        self.map.remove(entry.key.as_slice());
-                    } else {
-                        self.map.insert(entry.key, self.cursor);
-                    }
-                    self.cursor += entry.bytes;
+                    match entry.flag {
+                        Flag::Tombstone => self.map.remove(&entry.key),
+                        Flag::Set => self.map.insert(entry.key.clone(), self.cursor),
+                    };
+                    self.cursor += entry.bytes_len();
                 }
                 Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                 Err(e) => return Err(e),
@@ -84,9 +144,11 @@ impl KVStore {
         }
         Ok(())
     }
-
     fn read_entry(&mut self, offset: u64) -> Result<Entry, io::Error> {
         self.r_file.seek(SeekFrom::Start(offset))?;
+
+        let mut flag: [u8; 1] = [0; 1];
+        self.r_file.read_exact(&mut flag)?;
 
         let mut buf: [u8; 8] = [0; 8];
 
@@ -102,9 +164,9 @@ impl KVStore {
         self.r_file.read_exact(&mut val)?;
 
         Ok(Entry {
-            bytes: (4 + 4 + key_len + val_len) as u64,
-            // key_len,
-            // val_len,
+            flag: flag[0]
+                .try_into()
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Invalid flag byte"))?,
             key,
             val,
         })
